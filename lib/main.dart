@@ -1,9 +1,11 @@
 
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
 
@@ -11,10 +13,12 @@ void main() async {
     debugShowCheckedModeBanner: false,
     title: 'Pracovní deník',
     theme: ThemeData(
+      useMaterial3: true,
       colorSchemeSeed: Colors.blue,
       brightness: Brightness.light,
     ),
     darkTheme: ThemeData(
+      useMaterial3: true,
       colorSchemeSeed: Colors.blue,
       brightness: Brightness.dark,
     ),
@@ -42,13 +46,22 @@ class _DiaryState extends State<Diary> {
   bool autoHours = true;
 
   static const months = [
-    'Leden', 'Únor', 'Březen', 'Duben',
-    'Květen', 'Červen', 'Červenec', 'Srpen',
-    'Září', 'Říjen', 'Listopad', 'Prosinec',
+    'Leden',
+    'Únor',
+    'Březen',
+    'Duben',
+    'Květen',
+    'Červen',
+    'Červenec',
+    'Srpen',
+    'Září',
+    'Říjen',
+    'Listopad',
+    'Prosinec',
   ];
 
   static const weekdays = [
-    'Po', 'Út', 'St', 'Čt', 'Pá', 'So', 'Ne'
+    'Po', 'Út', 'St', 'Čt', 'Pá', 'So', 'Ne',
   ];
 
   @override
@@ -85,6 +98,7 @@ class _DiaryState extends State<Diary> {
 
   double? parse(String s) {
     final value = s.trim().replaceAll(',', '.');
+
     if (value.isEmpty) return null;
 
     final n = double.tryParse(value);
@@ -103,6 +117,9 @@ class _DiaryState extends State<Diary> {
         .replaceFirst(RegExp(r'\.$'), '')
         .replaceAll('.', ',');
   }
+
+  String two(int n) =>
+      n.toString().padLeft(2, '0');
 
   int? parseTime(String s) {
     final match = RegExp(
@@ -165,6 +182,7 @@ class _DiaryState extends State<Diary> {
   ) {
     setState(() {
       final e = entry(d);
+
       e[field] = value;
 
       if (autoHours &&
@@ -176,6 +194,8 @@ class _DiaryState extends State<Diary> {
 
         if (hours != null) {
           e['h'] = formatHours(hours);
+        } else if (value.isEmpty) {
+          e['h'] = '';
         }
       }
 
@@ -207,6 +227,100 @@ class _DiaryState extends State<Diary> {
     });
   }
 
+  // KOPIROVANI MESICE DO WHATSAPPU
+
+  Future<void> copyMonth() async {
+    FocusScope.of(context).unfocus();
+
+    final text = StringBuffer();
+
+    text.writeln(
+      'PRACOVNÍ DENÍK – '
+      '${months[month.month - 1].toUpperCase()} '
+      '${month.year}',
+    );
+
+    text.writeln();
+
+    int count = 0;
+
+    for (int d = 1; d <= days; d++) {
+      final e = entry(d);
+
+      final h =
+          (e['h'] ?? '').toString().trim();
+
+      final from =
+          (e['from'] ?? '').toString().trim();
+
+      final to =
+          (e['to'] ?? '').toString().trim();
+
+      final note =
+          (e['note'] ?? '').toString().trim();
+
+      if (h.isEmpty &&
+          from.isEmpty &&
+          to.isEmpty &&
+          note.isEmpty) {
+        continue;
+      }
+
+      final date = DateTime(
+        month.year,
+        month.month,
+        d,
+      );
+
+      final day = weekdays[date.weekday - 1];
+
+      final time = from.isEmpty && to.isEmpty
+          ? '–'
+          : '${from.isEmpty ? "?" : from}'
+            '–${to.isEmpty ? "?" : to}';
+
+      final hours = h.isEmpty ? '–' : '$h h';
+
+      text.writeln(
+        '$d.${month.month}. $day | '
+        '$time | $hours | '
+        '${note.isEmpty ? "–" : note}',
+      );
+
+      count++;
+    }
+
+    if (count == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Tento měsíc je prázdný.'),
+        ),
+      );
+
+      return;
+    }
+
+    text.writeln();
+    text.writeln('CELKEM: $total h');
+
+    await Clipboard.setData(
+      ClipboardData(text: text.toString()),
+    );
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Měsíc zkopírován! '
+          'Nyní ho můžeš vložit do WhatsAppu.',
+        ),
+      ),
+    );
+  }
+
+  // NASTAVENI
+
   void openSettings() {
     FocusScope.of(context).unfocus();
 
@@ -233,6 +347,30 @@ class _DiaryState extends State<Diary> {
                     onChanged: (value) {
                       setState(() {
                         autoHours = value;
+
+                        if (value) {
+                          for (final key
+                              in records.keys.toList()) {
+                            final e =
+                                Map<String, dynamic>.from(
+                              records[key],
+                            );
+
+                            final hours =
+                                calculateHours(
+                              (e['from'] ?? '')
+                                  .toString(),
+                              (e['to'] ?? '')
+                                  .toString(),
+                            );
+
+                            if (hours != null) {
+                              e['h'] =
+                                  formatHours(hours);
+                              records[key] = e;
+                            }
+                          }
+                        }
                       });
 
                       dialogSetState(() {});
@@ -241,18 +379,25 @@ class _DiaryState extends State<Diary> {
                         'autoHours',
                         value,
                       );
+
+                      save();
                     },
                   ),
+
                   const SizedBox(height: 12),
+
                   const Text(
-                    'Pokud automatický výpočet '
-                    'vypneš, můžeš zadávat čas '
+                    'Po vypnutí automatického '
+                    'výpočtu můžeš zadávat čas '
                     'a počet hodin nezávisle.',
                   ),
+
                   const SizedBox(height: 12),
+
                   const Text(
-                    'Přestávky se automaticky '
-                    'neodečítají.',
+                    'Čas se vybírá rolováním '
+                    'hodin a minut nebo pomocí '
+                    'klávesnice.',
                   ),
                 ],
               ),
@@ -271,12 +416,17 @@ class _DiaryState extends State<Diary> {
     );
   }
 
+  // VYBER CASU
+
   Future<void> pickTime(
     int d,
     String field,
   ) async {
+    FocusScope.of(context).unfocus();
+
     final selectedMonth = prefix;
     final e = entry(d);
+
     final old = (e[field] ?? '').toString();
     final minutes = parseTime(old);
 
@@ -290,42 +440,79 @@ class _DiaryState extends State<Diary> {
             minute: 0,
           );
 
-    final picked = await showTimePicker(
+    final result = await showModalBottomSheet<String>(
       context: context,
-      initialTime: initial,
-      initialEntryMode: TimePickerEntryMode.input,
-      helpText: field == 'from'
-          ? 'Začátek směny'
-          : 'Konec směny',
-      hourLabelText: 'Hodiny',
-      minuteLabelText: 'Minuty',
-      cancelText: 'Zrušit',
-      confirmText: 'Potvrdit',
-      builder: (context, child) {
-        return MediaQuery(
-          data: MediaQuery.of(context).copyWith(
-            alwaysUse24HourFormat: true,
-          ),
-          child: child!,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) {
+        return TimeWheelSheet(
+          initial: initial,
+          title: field == 'from'
+              ? 'Začátek směny'
+              : 'Konec směny',
         );
       },
     );
 
     if (!mounted ||
-        picked == null ||
+        result == null ||
         prefix != selectedMonth) {
       return;
     }
 
-    final h = picked.hour
-        .toString()
-        .padLeft(2, '0');
+    if (result == 'clear') {
+      update(d, field, '');
+      return;
+    }
 
-    final m = picked.minute
-        .toString()
-        .padLeft(2, '0');
+    if (result.startsWith('keyboard:')) {
+      final value = result.substring(9);
+      final selected = parseTime(value);
 
-    update(d, field, '$h:$m');
+      final keyboardInitial = selected != null
+          ? TimeOfDay(
+              hour: selected ~/ 60,
+              minute: selected % 60,
+            )
+          : initial;
+
+      final picked = await showTimePicker(
+        context: context,
+        initialTime: keyboardInitial,
+        initialEntryMode: TimePickerEntryMode.input,
+        helpText: field == 'from'
+            ? 'Začátek směny'
+            : 'Konec směny',
+        hourLabelText: 'Hodiny',
+        minuteLabelText: 'Minuty',
+        cancelText: 'Zrušit',
+        confirmText: 'Potvrdit',
+        builder: (context, child) {
+          return MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              alwaysUse24HourFormat: true,
+            ),
+            child: child!,
+          );
+        },
+      );
+
+      if (!mounted ||
+          picked == null ||
+          prefix != selectedMonth) {
+        return;
+      }
+
+      update(
+        d,
+        field,
+        '${two(picked.hour)}:${two(picked.minute)}',
+      );
+
+      return;
+    }
+
+    update(d, field, result);
   }
 
   Widget timeButton(
@@ -334,13 +521,13 @@ class _DiaryState extends State<Diary> {
     String value,
   ) {
     return SizedBox(
-      height: 34,
+      height: 38,
       width: 78,
       child: OutlinedButton(
         style: OutlinedButton.styleFrom(
           padding: EdgeInsets.zero,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(7),
+            borderRadius: BorderRadius.circular(8),
           ),
         ),
         onPressed: () => pickTime(d, field),
@@ -356,7 +543,9 @@ class _DiaryState extends State<Diary> {
 
   InputDecoration fieldDecoration(String hint) {
     return InputDecoration(
-      border: const OutlineInputBorder(),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+      ),
       hintText: hint,
       isDense: true,
       contentPadding: const EdgeInsets.symmetric(
@@ -366,13 +555,27 @@ class _DiaryState extends State<Diary> {
     );
   }
 
+  // HLAVNI OBRAZOVKA
+
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Pracovní deník'),
-        centerTitle: true,
+        title: const Text(
+          'Pracovní deník',
+          style: TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         actions: [
+          IconButton(
+            tooltip: 'Kopírovat měsíc',
+            onPressed: copyMonth,
+            icon: const Icon(Icons.copy_all),
+          ),
           IconButton(
             tooltip: 'Aktuální měsíc',
             onPressed: currentMonth,
@@ -385,9 +588,13 @@ class _DiaryState extends State<Diary> {
           ),
         ],
       ),
+
       body: SafeArea(
         child: Column(
           children: [
+
+            // PREPINANI MESICU
+
             Padding(
               padding: const EdgeInsets.symmetric(
                 horizontal: 8,
@@ -404,12 +611,14 @@ class _DiaryState extends State<Diary> {
                       size: 30,
                     ),
                   ),
+
                   Text(
                     '${months[month.month - 1]} '
                     '${month.year}',
                     style: Theme.of(context)
                         .textTheme.titleLarge,
                   ),
+
                   IconButton(
                     onPressed: () => shift(1),
                     icon: const Icon(
@@ -421,13 +630,14 @@ class _DiaryState extends State<Diary> {
               ),
             ),
 
+            // MESICNI SOUCET
+
             Card(
               margin: const EdgeInsets.symmetric(
                 horizontal: 12,
                 vertical: 8,
               ),
-              color: Theme.of(context)
-                  .colorScheme.primaryContainer,
+              color: colors.primaryContainer,
               child: Padding(
                 padding: const EdgeInsets.all(18),
                 child: Row(
@@ -441,6 +651,7 @@ class _DiaryState extends State<Diary> {
                         ),
                       ),
                     ),
+
                     Text(
                       '$total h',
                       style: const TextStyle(
@@ -452,6 +663,26 @@ class _DiaryState extends State<Diary> {
                 ),
               ),
             ),
+
+            // KOPIROVAT MESIC
+
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                12, 2, 12, 6,
+              ),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  onPressed: copyMonth,
+                  icon: const Icon(Icons.copy),
+                  label: const Text(
+                    'Kopírovat měsíc jako text',
+                  ),
+                ),
+              ),
+            ),
+
+            // STAV AUTOMATIKY
 
             Padding(
               padding: const EdgeInsets.fromLTRB(
@@ -466,10 +697,11 @@ class _DiaryState extends State<Diary> {
                         ? Icons.auto_awesome
                         : Icons.edit,
                     size: 15,
-                    color: Theme.of(context)
-                        .colorScheme.primary,
+                    color: colors.primary,
                   ),
+
                   const SizedBox(width: 5),
+
                   Text(
                     autoHours
                         ? 'Automatický výpočet zapnutý'
@@ -481,6 +713,8 @@ class _DiaryState extends State<Diary> {
                 ],
               ),
             ),
+
+            // HLAVICKA TABULKY
 
             const Padding(
               padding: EdgeInsets.fromLTRB(
@@ -498,6 +732,7 @@ class _DiaryState extends State<Diary> {
                       ),
                     ),
                   ),
+
                   SizedBox(
                     width: 78,
                     child: Text(
@@ -508,7 +743,9 @@ class _DiaryState extends State<Diary> {
                       ),
                     ),
                   ),
+
                   SizedBox(width: 6),
+
                   SizedBox(
                     width: 65,
                     child: Text(
@@ -519,7 +756,9 @@ class _DiaryState extends State<Diary> {
                       ),
                     ),
                   ),
+
                   SizedBox(width: 6),
+
                   Expanded(
                     child: Text(
                       'Kde / co',
@@ -535,15 +774,20 @@ class _DiaryState extends State<Diary> {
 
             const Divider(height: 1),
 
+            // SEZNAM DNI
+
             Expanded(
               child: ListView.separated(
                 key: ValueKey(prefix),
                 itemCount: days,
+
                 separatorBuilder: (context, i) {
                   return const Divider(height: 1);
                 },
+
                 itemBuilder: (context, i) {
                   final d = i + 1;
+
                   final date = DateTime(
                     month.year,
                     month.month,
@@ -554,10 +798,13 @@ class _DiaryState extends State<Diary> {
 
                   final h =
                       (e['h'] ?? '').toString();
+
                   final note =
                       (e['note'] ?? '').toString();
+
                   final from =
                       (e['from'] ?? '').toString();
+
                   final to =
                       (e['to'] ?? '').toString();
 
@@ -565,6 +812,7 @@ class _DiaryState extends State<Diary> {
                       calculateHours(from, to) != null;
 
                   final locked = autoHours && hasTimes;
+
                   final weekend = date.weekday >= 6;
 
                   final today = DateTime.now();
@@ -576,18 +824,21 @@ class _DiaryState extends State<Diary> {
 
                   return Container(
                     color: isToday
-                        ? Theme.of(context)
-                            .colorScheme
-                            .primaryContainer
+                        ? colors.primaryContainer
                             .withAlpha(80)
                         : null,
+
                     padding:
                         const EdgeInsets.symmetric(
                       horizontal: 8,
                       vertical: 8,
                     ),
+
                     child: Row(
                       children: [
+
+                        // DATUM
+
                         SizedBox(
                           width: 47,
                           child: Column(
@@ -605,6 +856,7 @@ class _DiaryState extends State<Diary> {
                                       : null,
                                 ),
                               ),
+
                               Text(
                                 weekdays[
                                     date.weekday - 1],
@@ -619,6 +871,8 @@ class _DiaryState extends State<Diary> {
                           ),
                         ),
 
+                        // CAS OD DO
+
                         SizedBox(
                           width: 78,
                           child: Column(
@@ -626,7 +880,9 @@ class _DiaryState extends State<Diary> {
                               timeButton(
                                 d, 'from', from,
                               ),
+
                               const SizedBox(height: 4),
+
                               timeButton(
                                 d, 'to', to,
                               ),
@@ -635,6 +891,8 @@ class _DiaryState extends State<Diary> {
                         ),
 
                         const SizedBox(width: 6),
+
+                        // HODINY
 
                         SizedBox(
                           width: 65,
@@ -646,16 +904,16 @@ class _DiaryState extends State<Diary> {
                                     vertical: 13,
                                     horizontal: 5,
                                   ),
+
                                   decoration:
                                       BoxDecoration(
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme
+                                    color: colors
                                         .secondaryContainer,
                                     borderRadius:
                                         BorderRadius
-                                            .circular(7),
+                                            .circular(8),
                                   ),
+
                                   child: Text(
                                     h,
                                     textAlign:
@@ -672,20 +930,33 @@ class _DiaryState extends State<Diary> {
                                   key: ValueKey(
                                     '${keyFor(d)}-hours',
                                   ),
+
                                   initialValue: h,
+
                                   keyboardType:
                                       const TextInputType
                                           .numberWithOptions(
                                     decimal: true,
                                   ),
+
+                                  inputFormatters: [
+                                    FilteringTextInputFormatter
+                                        .allow(
+                                      RegExp(r'[0-9,.]'),
+                                    ),
+                                  ],
+
                                   textAlign:
                                       TextAlign.center,
+
                                   style:
                                       const TextStyle(
                                     fontSize: 14,
                                   ),
+
                                   decoration:
                                       fieldDecoration('0'),
+
                                   onChanged: (v) {
                                     update(d, 'h', v);
                                   },
@@ -694,21 +965,28 @@ class _DiaryState extends State<Diary> {
 
                         const SizedBox(width: 6),
 
+                        // POZNAMKA
+
                         Expanded(
                           child: TextFormField(
                             key: ValueKey(
                               '${keyFor(d)}-note',
                             ),
+
                             initialValue: note,
+
                             minLines: 2,
                             maxLines: 5,
+
                             style: const TextStyle(
                               fontSize: 14,
                             ),
+
                             decoration:
                                 fieldDecoration(
                               'Kde / co',
                             ),
+
                             onChanged: (v) {
                               update(d, 'note', v);
                             },
@@ -729,12 +1007,284 @@ class _DiaryState extends State<Diary> {
                 'Záznamy se ukládají automaticky.',
                 style: TextStyle(
                   fontSize: 11,
-                  color: Theme.of(context)
-                      .colorScheme.onSurfaceVariant,
+                  color: colors.onSurfaceVariant,
                 ),
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ROLOVACI VYBER CASU
+
+class TimeWheelSheet extends StatefulWidget {
+  final TimeOfDay initial;
+  final String title;
+
+  const TimeWheelSheet({
+    super.key,
+    required this.initial,
+    required this.title,
+  });
+
+  @override
+  State<TimeWheelSheet> createState() =>
+      _TimeWheelSheetState();
+}
+
+class _TimeWheelSheetState
+    extends State<TimeWheelSheet> {
+
+  late int selectedHour;
+  late int selectedMinute;
+
+  late FixedExtentScrollController hourController;
+  late FixedExtentScrollController minuteController;
+
+  @override
+  void initState() {
+    super.initState();
+
+    selectedHour = widget.initial.hour;
+    selectedMinute = widget.initial.minute;
+
+    hourController = FixedExtentScrollController(
+      initialItem: selectedHour,
+    );
+
+    minuteController = FixedExtentScrollController(
+      initialItem: selectedMinute,
+    );
+  }
+
+  @override
+  void dispose() {
+    hourController.dispose();
+    minuteController.dispose();
+    super.dispose();
+  }
+
+  String two(int n) =>
+      n.toString().padLeft(2, '0');
+
+  String get selectedTime =>
+      '${two(selectedHour)}:${two(selectedMinute)}';
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            16, 0, 16, 16,
+          ),
+
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+
+              // TITULEK A KLAVESNICE
+
+              Row(
+                mainAxisAlignment:
+                    MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    widget.title,
+                    style: Theme.of(context)
+                        .textTheme.titleLarge,
+                  ),
+
+                  IconButton(
+                    tooltip: 'Zadat klávesnicí',
+                    onPressed: () {
+                      Navigator.pop(
+                        context,
+                        'keyboard:$selectedTime',
+                      );
+                    },
+                    icon: const Icon(Icons.keyboard),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 12),
+
+              // VELKY NAHLED CASU
+
+              Text(
+                selectedTime,
+                style: const TextStyle(
+                  fontSize: 40,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(height: 12),
+
+              const Row(
+                mainAxisAlignment:
+                    MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 100,
+                    child: Text(
+                      'Hodiny',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+
+                  SizedBox(width: 20),
+
+                  SizedBox(
+                    width: 100,
+                    child: Text(
+                      'Minuty',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ],
+              ),
+
+              // KOLECKA
+
+              SizedBox(
+                height: 180,
+                child: Row(
+                  mainAxisAlignment:
+                      MainAxisAlignment.center,
+                  children: [
+
+                    // HODINY
+
+                    SizedBox(
+                      width: 100,
+                      child: CupertinoPicker(
+                        scrollController:
+                            hourController,
+
+                        itemExtent: 44,
+                        looping: true,
+
+                        onSelectedItemChanged: (v) {
+                          setState(() {
+                            selectedHour = v;
+                          });
+                        },
+
+                        children: List.generate(
+                          24,
+                          (i) => Center(
+                            child: Text(
+                              two(i),
+                              style: TextStyle(
+                                fontSize: 28,
+                                color: colors.onSurface,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(
+                      width: 20,
+                      child: Center(
+                        child: Text(
+                          ':',
+                          style: TextStyle(
+                            fontSize: 28,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // MINUTY
+
+                    SizedBox(
+                      width: 100,
+                      child: CupertinoPicker(
+                        scrollController:
+                            minuteController,
+
+                        itemExtent: 44,
+                        looping: true,
+
+                        onSelectedItemChanged: (v) {
+                          setState(() {
+                            selectedMinute = v;
+                          });
+                        },
+
+                        children: List.generate(
+                          60,
+                          (i) => Center(
+                            child: Text(
+                              two(i),
+                              style: TextStyle(
+                                fontSize: 28,
+                                color: colors.onSurface,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 12),
+
+              // POTVRDIT
+
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () {
+                    Navigator.pop(
+                      context,
+                      selectedTime,
+                    );
+                  },
+                  child: const Text('Potvrdit'),
+                ),
+              ),
+
+              // RUCNI ZADAVANI
+
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(
+                      context,
+                      'keyboard:$selectedTime',
+                    );
+                  },
+                  icon: const Icon(Icons.keyboard),
+                  label: const Text(
+                    'Zadat čas klávesnicí',
+                  ),
+                ),
+              ),
+
+              // VYMAZAT CAS
+
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context, 'clear');
+                },
+                child: const Text('Vymazat čas'),
+              ),
+            ],
+          ),
         ),
       ),
     );
