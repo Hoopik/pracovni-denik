@@ -1,3 +1,4 @@
+
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -38,20 +39,12 @@ class _DiaryState extends State<Diary> {
   );
 
   Map<String, dynamic> records = {};
+  bool autoHours = true;
 
   static const months = [
-    'Leden',
-    'Únor',
-    'Březen',
-    'Duben',
-    'Květen',
-    'Červen',
-    'Červenec',
-    'Srpen',
-    'Září',
-    'Říjen',
-    'Listopad',
-    'Prosinec',
+    'Leden', 'Únor', 'Březen', 'Duben',
+    'Květen', 'Červen', 'Červenec', 'Srpen',
+    'Září', 'Říjen', 'Listopad', 'Prosinec',
   ];
 
   static const weekdays = [
@@ -61,6 +54,9 @@ class _DiaryState extends State<Diary> {
   @override
   void initState() {
     super.initState();
+
+    autoHours =
+        widget.prefs.getBool('autoHours') ?? true;
 
     try {
       records = Map<String, dynamic>.from(
@@ -89,7 +85,6 @@ class _DiaryState extends State<Diary> {
 
   double? parse(String s) {
     final value = s.trim().replaceAll(',', '.');
-
     if (value.isEmpty) return null;
 
     final n = double.tryParse(value);
@@ -101,6 +96,49 @@ class _DiaryState extends State<Diary> {
     return n;
   }
 
+  String formatHours(double n) {
+    return n
+        .toStringAsFixed(6)
+        .replaceFirst(RegExp(r'0+$'), '')
+        .replaceFirst(RegExp(r'\.$'), '')
+        .replaceAll('.', ',');
+  }
+
+  int? parseTime(String s) {
+    final match = RegExp(
+      r'^(\d{1,2}):(\d{2})$',
+    ).firstMatch(s.trim());
+
+    if (match == null) return null;
+
+    final h = int.parse(match.group(1)!);
+    final m = int.parse(match.group(2)!);
+
+    if (h > 23 || m > 59) return null;
+
+    return h * 60 + m;
+  }
+
+  double? calculateHours(
+    String from,
+    String to,
+  ) {
+    final start = parseTime(from);
+    final end = parseTime(to);
+
+    if (start == null || end == null) {
+      return null;
+    }
+
+    int minutes = end - start;
+
+    if (minutes < 0) {
+      minutes += 24 * 60;
+    }
+
+    return minutes / 60;
+  }
+
   String get total {
     double n = 0;
 
@@ -110,24 +148,41 @@ class _DiaryState extends State<Diary> {
       ) ?? 0;
     }
 
-    return n
-        .toStringAsFixed(6)
-        .replaceFirst(RegExp(r'0+$'), '')
-        .replaceFirst(RegExp(r'\.$'), '')
-        .replaceAll('.', ',');
+    return formatHours(n);
   }
 
-  void update(int d, String field, String value) {
-    setState(() {
-      final e = entry(d);
-      e[field] = value;
-      records[keyFor(d)] = e;
-    });
-
+  void save() {
     widget.prefs.setString(
       'diary',
       jsonEncode(records),
     );
+  }
+
+  void update(
+    int d,
+    String field,
+    String value,
+  ) {
+    setState(() {
+      final e = entry(d);
+      e[field] = value;
+
+      if (autoHours &&
+          (field == 'from' || field == 'to')) {
+        final hours = calculateHours(
+          (e['from'] ?? '').toString(),
+          (e['to'] ?? '').toString(),
+        );
+
+        if (hours != null) {
+          e['h'] = formatHours(hours);
+        }
+      }
+
+      records[keyFor(d)] = e;
+    });
+
+    save();
   }
 
   void shift(int n) {
@@ -152,6 +207,165 @@ class _DiaryState extends State<Diary> {
     });
   }
 
+  void openSettings() {
+    FocusScope.of(context).unfocus();
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, dialogSetState) {
+            return AlertDialog(
+              title: const Text('Nastavení'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Automatický výpočet hodin',
+                    ),
+                    subtitle: const Text(
+                      'Vypočítá hodiny podle '
+                      'začátku a konce směny.',
+                    ),
+                    value: autoHours,
+                    onChanged: (value) {
+                      setState(() {
+                        autoHours = value;
+                      });
+
+                      dialogSetState(() {});
+
+                      widget.prefs.setBool(
+                        'autoHours',
+                        value,
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Pokud automatický výpočet '
+                    'vypneš, můžeš zadávat čas '
+                    'a počet hodin nezávisle.',
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Přestávky se automaticky '
+                    'neodečítají.',
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(dialogContext);
+                  },
+                  child: const Text('Hotovo'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> pickTime(
+    int d,
+    String field,
+  ) async {
+    final selectedMonth = prefix;
+    final e = entry(d);
+    final old = (e[field] ?? '').toString();
+    final minutes = parseTime(old);
+
+    final initial = minutes != null
+        ? TimeOfDay(
+            hour: minutes ~/ 60,
+            minute: minutes % 60,
+          )
+        : TimeOfDay(
+            hour: field == 'from' ? 7 : 15,
+            minute: 0,
+          );
+
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: initial,
+      initialEntryMode: TimePickerEntryMode.input,
+      helpText: field == 'from'
+          ? 'Začátek směny'
+          : 'Konec směny',
+      hourLabelText: 'Hodiny',
+      minuteLabelText: 'Minuty',
+      cancelText: 'Zrušit',
+      confirmText: 'Potvrdit',
+      builder: (context, child) {
+        return MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            alwaysUse24HourFormat: true,
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (!mounted ||
+        picked == null ||
+        prefix != selectedMonth) {
+      return;
+    }
+
+    final h = picked.hour
+        .toString()
+        .padLeft(2, '0');
+
+    final m = picked.minute
+        .toString()
+        .padLeft(2, '0');
+
+    update(d, field, '$h:$m');
+  }
+
+  Widget timeButton(
+    int d,
+    String field,
+    String value,
+  ) {
+    return SizedBox(
+      height: 34,
+      width: 78,
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+          padding: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(7),
+          ),
+        ),
+        onPressed: () => pickTime(d, field),
+        child: Text(
+          value.isEmpty
+              ? (field == 'from' ? 'Od' : 'Do')
+              : value,
+          style: const TextStyle(fontSize: 13),
+        ),
+      ),
+    );
+  }
+
+  InputDecoration fieldDecoration(String hint) {
+    return InputDecoration(
+      border: const OutlineInputBorder(),
+      hintText: hint,
+      isDense: true,
+      contentPadding: const EdgeInsets.symmetric(
+        horizontal: 7,
+        vertical: 12,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -164,6 +378,11 @@ class _DiaryState extends State<Diary> {
             onPressed: currentMonth,
             icon: const Icon(Icons.today),
           ),
+          IconButton(
+            tooltip: 'Nastavení',
+            onPressed: openSettings,
+            icon: const Icon(Icons.settings),
+          ),
         ],
       ),
       body: SafeArea(
@@ -171,8 +390,8 @@ class _DiaryState extends State<Diary> {
           children: [
             Padding(
               padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 8,
+                horizontal: 8,
+                vertical: 6,
               ),
               child: Row(
                 mainAxisAlignment:
@@ -186,7 +405,8 @@ class _DiaryState extends State<Diary> {
                     ),
                   ),
                   Text(
-                    '${months[month.month - 1]} ${month.year}',
+                    '${months[month.month - 1]} '
+                    '${month.year}',
                     style: Theme.of(context)
                         .textTheme.titleLarge,
                   ),
@@ -211,8 +431,6 @@ class _DiaryState extends State<Diary> {
               child: Padding(
                 padding: const EdgeInsets.all(18),
                 child: Row(
-                  mainAxisAlignment:
-                      MainAxisAlignment.spaceBetween,
                   children: [
                     const Expanded(
                       child: Text(
@@ -226,7 +444,7 @@ class _DiaryState extends State<Diary> {
                     Text(
                       '$total h',
                       style: const TextStyle(
-                        fontSize: 30,
+                        fontSize: 28,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -235,36 +453,79 @@ class _DiaryState extends State<Diary> {
               ),
             ),
 
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                10, 4, 10, 8,
+              ),
+              child: Row(
+                mainAxisAlignment:
+                    MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    autoHours
+                        ? Icons.auto_awesome
+                        : Icons.edit,
+                    size: 15,
+                    color: Theme.of(context)
+                        .colorScheme.primary,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    autoHours
+                        ? 'Automatický výpočet zapnutý'
+                        : 'Ruční zadávání hodin',
+                    style: const TextStyle(
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
             const Padding(
               padding: EdgeInsets.fromLTRB(
-                12, 12, 12, 6,
+                8, 6, 8, 6,
               ),
               child: Row(
                 children: [
                   SizedBox(
-                    width: 58,
+                    width: 47,
                     child: Text(
-                      'Den',
+                      'Datum',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
+                        fontSize: 12,
                       ),
                     ),
                   ),
                   SizedBox(
-                    width: 85,
+                    width: 78,
+                    child: Text(
+                      'Čas od–do',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 6),
+                  SizedBox(
+                    width: 65,
                     child: Text(
                       'Hodiny',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
+                        fontSize: 12,
                       ),
                     ),
                   ),
-                  SizedBox(width: 8),
+                  SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      'Místo / poznámka',
+                      'Kde / co',
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
+                        fontSize: 12,
                       ),
                     ),
                   ),
@@ -272,15 +533,17 @@ class _DiaryState extends State<Diary> {
               ),
             ),
 
-            const Divider(),
+            const Divider(height: 1),
 
             Expanded(
-              child: ListView.builder(
+              child: ListView.separated(
                 key: ValueKey(prefix),
                 itemCount: days,
+                separatorBuilder: (context, i) {
+                  return const Divider(height: 1);
+                },
                 itemBuilder: (context, i) {
                   final d = i + 1;
-
                   final date = DateTime(
                     month.year,
                     month.month,
@@ -288,10 +551,20 @@ class _DiaryState extends State<Diary> {
                   );
 
                   final e = entry(d);
-                  final h = (e['h'] ?? '').toString();
+
+                  final h =
+                      (e['h'] ?? '').toString();
                   final note =
                       (e['note'] ?? '').toString();
+                  final from =
+                      (e['from'] ?? '').toString();
+                  final to =
+                      (e['to'] ?? '').toString();
 
+                  final hasTimes =
+                      calculateHours(from, to) != null;
+
+                  final locked = autoHours && hasTimes;
                   final weekend = date.weekday >= 6;
 
                   final today = DateTime.now();
@@ -310,13 +583,13 @@ class _DiaryState extends State<Diary> {
                         : null,
                     padding:
                         const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 5,
+                      horizontal: 8,
+                      vertical: 8,
                     ),
                     child: Row(
                       children: [
                         SizedBox(
-                          width: 58,
+                          width: 47,
                           child: Column(
                             crossAxisAlignment:
                                 CrossAxisAlignment.start,
@@ -326,7 +599,7 @@ class _DiaryState extends State<Diary> {
                                 style: TextStyle(
                                   fontWeight:
                                       FontWeight.bold,
-                                  fontSize: 15,
+                                  fontSize: 14,
                                   color: weekend
                                       ? Colors.orange
                                       : null,
@@ -347,41 +620,79 @@ class _DiaryState extends State<Diary> {
                         ),
 
                         SizedBox(
-                          width: 85,
-                          child: TextFormField(
-                            key: ValueKey(
-                              '${keyFor(d)}-hours',
-                            ),
-                            initialValue: h,
-                            keyboardType:
-                                const TextInputType
-                                    .numberWithOptions(
-                              decimal: true,
-                            ),
-                            decoration: InputDecoration(
-                              border:
-                                  const OutlineInputBorder(),
-                              hintText: '0',
-                              isDense: true,
-                              contentPadding:
-                                  const EdgeInsets
-                                      .symmetric(
-                                horizontal: 10,
-                                vertical: 13,
+                          width: 78,
+                          child: Column(
+                            children: [
+                              timeButton(
+                                d, 'from', from,
                               ),
-                              errorText:
-                                  h.trim().isNotEmpty &&
-                                          parse(h) == null
-                                      ? 'Číslo'
-                                      : null,
-                            ),
-                            onChanged: (v) {
-                              update(d, 'h', v);
-                            },
+                              const SizedBox(height: 4),
+                              timeButton(
+                                d, 'to', to,
+                              ),
+                            ],
                           ),
                         ),
 
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 6),
+
+                        SizedBox(
+                          width: 65,
+                          child: locked
+                              ? Container(
+                                  padding:
+                                      const EdgeInsets
+                                          .symmetric(
+                                    vertical: 13,
+                                    horizontal: 5,
+                                  ),
+                                  decoration:
+                                      BoxDecoration(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme
+                                        .secondaryContainer,
+                                    borderRadius:
+                                        BorderRadius
+                                            .circular(7),
+                                  ),
+                                  child: Text(
+                                    h,
+                                    textAlign:
+                                        TextAlign.center,
+                                    style:
+                                        const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight:
+                                          FontWeight.bold,
+                                    ),
+                                  ),
+                                )
+                              : TextFormField(
+                                  key: ValueKey(
+                                    '${keyFor(d)}-hours',
+                                  ),
+                                  initialValue: h,
+                                  keyboardType:
+                                      const TextInputType
+                                          .numberWithOptions(
+                                    decimal: true,
+                                  ),
+                                  textAlign:
+                                      TextAlign.center,
+                                  style:
+                                      const TextStyle(
+                                    fontSize: 14,
+                                  ),
+                                  decoration:
+                                      fieldDecoration('0'),
+                                  onChanged: (v) {
+                                    update(d, 'h', v);
+                                  },
+                                ),
+                        ),
+
+                        const SizedBox(width: 6),
 
                         Expanded(
                           child: TextFormField(
@@ -389,19 +700,14 @@ class _DiaryState extends State<Diary> {
                               '${keyFor(d)}-note',
                             ),
                             initialValue: note,
-                            minLines: 1,
-                            maxLines: 3,
+                            minLines: 2,
+                            maxLines: 5,
+                            style: const TextStyle(
+                              fontSize: 14,
+                            ),
                             decoration:
-                                const InputDecoration(
-                              border:
-                                  OutlineInputBorder(),
-                              hintText: 'Kde / co',
-                              isDense: true,
-                              contentPadding:
-                                  EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 13,
-                              ),
+                                fieldDecoration(
+                              'Kde / co',
                             ),
                             onChanged: (v) {
                               update(d, 'note', v);
@@ -415,14 +721,14 @@ class _DiaryState extends State<Diary> {
               ),
             ),
 
-            const Divider(),
+            const Divider(height: 1),
 
             Padding(
               padding: const EdgeInsets.all(8),
               child: Text(
                 'Záznamy se ukládají automaticky.',
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: 11,
                   color: Theme.of(context)
                       .colorScheme.onSurfaceVariant,
                 ),
