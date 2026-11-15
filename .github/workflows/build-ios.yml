@@ -1,0 +1,133 @@
+
+name: Build iOS
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Check application source
+        run: |
+          test -f lib/main.dart
+          test -f pubspec.yaml
+          test -f icon.jpg
+          grep -q "class Diary" lib/main.dart
+
+      - name: Create iOS platform
+        run: |
+          cp lib/main.dart /tmp/main.dart
+          cp pubspec.yaml /tmp/pubspec.yaml
+
+          flutter create \
+            --platforms=ios \
+            --project-name pracovni_denik \
+            --no-pub .
+
+          cp /tmp/main.dart lib/main.dart
+          cp /tmp/pubspec.yaml pubspec.yaml
+
+      - name: Generate custom cat icon
+        run: |
+          python3 -m venv /tmp/icon-env
+          /tmp/icon-env/bin/pip install pillow
+
+          /tmp/icon-env/bin/python - <<'PY'
+          from PIL import Image, ImageOps
+          from pathlib import Path
+          import json
+
+          image = Image.open("icon.jpg")
+          image = ImageOps.exif_transpose(image)
+          image = image.convert("RGB")
+
+          folder = Path(
+              "ios/Runner/Assets.xcassets/AppIcon.appiconset"
+          )
+
+          folder.mkdir(parents=True, exist_ok=True)
+
+          for file in folder.glob("*.png"):
+              file.unlink()
+
+          icon = ImageOps.fit(
+              image,
+              (1024, 1024),
+              method=Image.Resampling.LANCZOS
+          )
+
+          icon.save(folder / "AppIcon.png")
+
+          contents = {
+              "images": [
+                  {
+                      "filename": "AppIcon.png",
+                      "idiom": "universal",
+                      "platform": "ios",
+                      "size": "1024x1024"
+                  }
+              ],
+              "info": {
+                  "author": "xcode",
+                  "version": 1
+              }
+          }
+
+          (folder / "Contents.json").write_text(
+              json.dumps(contents, indent=2)
+          )
+
+          print("iOS cat icon created!")
+          PY
+
+      - name: Set application name
+        run: |
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleDisplayName Pracovní deník" \
+            ios/Runner/Info.plist || \
+          /usr/libexec/PlistBuddy \
+            -c "Add :CFBundleDisplayName string Pracovní deník" \
+            ios/Runner/Info.plist
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleName Pracovní deník" \
+            ios/Runner/Info.plist
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Check Dart code
+        run: dart analyze lib/main.dart
+
+      - name: Build iOS release
+        run: flutter build ios --release --no-codesign
+
+      - name: Create IPA
+        run: |
+          mkdir -p ipa/Payload
+
+          cp -R build/ios/iphoneos/Runner.app ipa/Payload/
+
+          cd ipa
+
+          zip -qry pracovni-denik.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: pracovni-denik-iphone
+          path: ipa/pracovni-denik.ipa
