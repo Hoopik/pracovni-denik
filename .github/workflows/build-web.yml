@@ -1,0 +1,274 @@
+
+name: Build Web PWA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'pubspec.yaml'
+      - 'icon.jpg'
+      - '.github/workflows/build-web.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Create Web platform
+        run: |
+          cp lib/main.dart /tmp/main.dart
+          cp pubspec.yaml /tmp/pubspec.yaml
+
+          flutter create \
+            --platforms=web \
+            --project-name pracovni_denik \
+            --no-pub .
+
+          cp /tmp/main.dart lib/main.dart
+          cp /tmp/pubspec.yaml pubspec.yaml
+
+      - name: Generate cat icons and manifest
+        run: |
+          python3 -m venv /tmp/icon-env
+          /tmp/icon-env/bin/pip install pillow
+
+          /tmp/icon-env/bin/python - <<'PY'
+          from PIL import Image, ImageOps
+          from pathlib import Path
+          import json
+
+          image = Image.open("icon.jpg")
+          image = ImageOps.exif_transpose(image)
+          image = image.convert("RGB")
+
+          folder = Path("web/icons")
+          folder.mkdir(parents=True, exist_ok=True)
+
+          for size in [180, 192, 512]:
+              icon = ImageOps.fit(
+                  image,
+                  (size, size),
+                  method=Image.Resampling.LANCZOS
+              )
+              icon.save(folder / f"Icon-{size}.png")
+
+          ImageOps.fit(
+              image, (32, 32)
+          ).save("web/favicon.png")
+
+          manifest = {
+              "name": "Pracovní deník",
+              "short_name": "Deník",
+              "start_url": "./",
+              "scope": "./",
+              "display": "standalone",
+              "background_color": "#10141d",
+              "theme_color": "#10141d",
+              "description": "Evidence odpracovaných hodin",
+              "orientation": "any",
+              "prefer_related_applications": False,
+              "icons": [
+                  {
+                      "src": "icons/Icon-192.png",
+                      "sizes": "192x192",
+                      "type": "image/png",
+                      "purpose": "any"
+                  },
+                  {
+                      "src": "icons/Icon-512.png",
+                      "sizes": "512x512",
+                      "type": "image/png",
+                      "purpose": "any"
+                  }
+              ]
+          }
+
+          Path("web/manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2)
+          )
+
+          html = Path("web/index.html")
+          content = html.read_text()
+
+          content = content.replace(
+              "<title>pracovni_denik</title>",
+              "<title>Pracovní deník</title>"
+          )
+
+          content = content.replace(
+              'icons/Icon-192.png',
+              'icons/Icon-180.png'
+          )
+
+          content = content.replace(
+              'content="pracovni_denik"',
+              'content="Deník"'
+          )
+
+          html.write_text(content)
+          PY
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Flutter Web
+        run: |
+          flutter build web \
+            --release \
+            --base-href /pracovni-denik/ \
+            --no-web-resources-cdn
+
+      - name: Enable offline support
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+
+          root = Path("build/web")
+          version = os.environ["GITHUB_SHA"]
+
+          files = [
+              "./" + p.relative_to(root).as_posix()
+              for p in root.rglob("*")
+              if p.is_file()
+              and p.name not in [
+                  "flutter_service_worker.js",
+                  "sw.js"
+              ]
+          ]
+
+          worker = """
+          const CACHE = 'denik-' + VERSION;
+          const FILES = ASSETS;
+
+          self.addEventListener('install', event => {
+            event.waitUntil(
+              caches.open(CACHE)
+                .then(cache => cache.addAll(FILES))
+                .then(() => self.skipWaiting())
+            );
+          });
+
+          self.addEventListener('activate', event => {
+            event.waitUntil(
+              caches.keys().then(keys =>
+                Promise.all(
+                  keys.filter(key =>
+                    key.startsWith('denik-') &&
+                    key !== CACHE
+                  ).map(key => caches.delete(key))
+                )
+              ).then(() => self.clients.claim())
+            );
+          });
+
+          self.addEventListener('fetch', event => {
+            if (event.request.method !== 'GET') return;
+            if (new URL(event.request.url).origin !==
+                self.location.origin) return;
+
+            if (event.request.mode === 'navigate') {
+              event.respondWith(
+                fetch(event.request).catch(() =>
+                  caches.match(
+                    new URL('./index.html',
+                    self.registration.scope).href
+                  )
+                )
+              );
+              return;
+            }
+
+            event.respondWith(
+              caches.match(event.request).then(cached =>
+                cached || fetch(event.request)
+              )
+            );
+          });
+          """
+
+          worker = worker.replace(
+              "VERSION", json.dumps(version)
+          ).replace(
+              "ASSETS", json.dumps(files)
+          )
+
+          (root / "sw.js").write_text(worker)
+
+          html = root / "index.html"
+          content = html.read_text()
+
+          registration = '''
+          <script>
+            if ('serviceWorker' in navigator) {
+              window.addEventListener('load', () => {
+                navigator.serviceWorker
+                  .register('./sw.js')
+                  .catch(console.error);
+              });
+            }
+          </script>
+          '''
+
+          content = content.replace(
+              "</body>",
+              registration + "</body>"
+          )
+
+          html.write_text(content)
+
+          bootstrap = root / "flutter_bootstrap.js"
+
+          if bootstrap.exists():
+              import re
+              code = bootstrap.read_text()
+              code = re.sub(
+                  r'serviceWorkerSettings\s*:\s*\{[^{}]*\}\s*,?',
+                  '',
+                  code
+              )
+              bootstrap.write_text(code)
+
+          print("Offline files:", len(files))
+          PY
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Web
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
